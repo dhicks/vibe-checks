@@ -2,6 +2,7 @@ library(tidyverse)
 library(rcanvas)
 
 library(ollamar)
+library(jsonlite)
 library(stringr)
 library(glue)
 library(tictoc)
@@ -75,7 +76,7 @@ parsed_df = parsed_resps |>
       str_squish() %>%
       str_c(collapse = ', ') %>%
       str_c('[', ., ']') |>
-      jsonlite::fromJSON() |>
+      fromJSON() |>
       as_tibble() |>
       mutate(id = 1:n()) |>
       select(id, everything())
@@ -144,10 +145,10 @@ clustered = generate(
 )
 
 clustered |>
-      jsonlite::fromJSON() |>
+      fromJSON() |>
       magrittr::extract2('think')
 
-resp_df = jsonlite::fromJSON(clustered)$classified |>
+resp_df = fromJSON(clustered)$classified |>
       distinct()
 
 stopifnot(identical(nrow(resp_df), nrow(parsed_df)))
