@@ -183,6 +183,9 @@ header = glue(
 date: {today()}
 title: {stamp("Vibe check for Jan 1")(today())}
 subtitle: \"Responses by PHIL 006 students, clustered using {model}\"
+format: 
+  html:
+    page-layout: full
 ---'
 ) |>
       str_split_1('\n')
