@@ -3,7 +3,6 @@ library(rcanvas)
 
 library(ollamar)
 library(jsonlite)
-library(stringr)
 library(glue)
 library(tictoc)
 
@@ -14,13 +13,46 @@ model = 'gemma3:12b'
 num_ctx = 8000
 
 # Retrieve responses ----
+## Canvas parameters ----
+## STE Fall 2025
+## <https://catcourses.ucmerced.edu/courses/35976>
+course_id = '35976'
+## Vibe check for Week 02
+assignment_id = '503498'
 
-# *[TODO]*
+options(.rcanvas.show.url = TRUE)
+## API token: <https://github.com/daranzolin/rcanvas?tab=readme-ov-file#setup>
+set_canvas_domain('https://catcourses.ucmerced.edu')
+
+## Get students ----
+students_df = get_course_items(course_id, item = "students") |>
+      filter(!is.na(sis_user_id)) |>
+      distinct() |>
+      as_tibble() |>
+      select(id, name, sortable_name) |>
+      arrange(sortable_name) |>
+      mutate(
+            idx = {
+                  row_number() %>%
+                        str_pad(., pad = '0', width = max(str_length(.)))
+            },
+            prefix = glue('{idx}-{sortable_name}')
+      )
+
+## Get submissions ----
+resps = get_submissions(course_id, 'assignments', assignment_id) |>
+      select(id = user_id, body) |>
+      filter(!is.na(body)) |>
+      mutate(body = {
+            body |> xfun::strip_html() |> textutils::HTMLdecode()
+      }) |>
+      left_join(students_df, by = 'id') |>
+      select(student = prefix, body)
 
 ## Claude-generated responses for development
-resps = 'gen_responses.txt' |>
-      read_file() |>
-      str_split_1('==========')
+# resps = 'gen_responses.txt' |>
+#       read_file() |>
+#       str_split_1('==========')
 
 # Parse responses ----
 ## LLM response schema ----
@@ -41,11 +73,13 @@ instructions = '/Users/danhicks/Google Drive/Teaching/*STE/site/assignments/vibe
 
 ## Task prompt ----
 system = glue(
-      'A college student was given instructions for a short reading-reflection assignment. Your job is to identify the parts of the student\'s response, and arrange them into a JSON structure for further processing. 
+      'A college student was given a short, structured reading-reflection assignment. Your job is to identify the parts of the student\'s response, and arrange them into a JSON structure for further processing. 
 
 Pay attention to the structure of the response, not the content. Do not address the questions or provide any commentary on the quote or their answer. 
 
-If the student includes paragraph headers like "Quote:" or "Question:" you should use these to parse the structure of the response, but skip them in your output. Otherwise you should copy each part verbatim. The student should provide a citation at the end of the quote. Make sure you include this citation. 
+The `full_response` field should contain the response exactly as given. For the other fields, if the response includes section numbers or paragraph headers like "Quote:" or "Question:" you should use these to parse the structure of the response, but skip them in your output. Otherwise you should copy each part verbatim. The student should provide a citation at the end of the quote. Make sure you include this citation. 
+
+If you cannot parse the response into the identified parts, return the response exactly as given in `full_response` and `NA` in the other fields. 
 
 
 ==========
@@ -54,6 +88,7 @@ Assignment Instructions:
 {instructions}
 
 ==========
+Student Response: 
 '
 )
 
@@ -69,7 +104,7 @@ parse_resp = partial(
 
 ## ~15 sec/response using gemma3:12b
 tic()
-parsed_resps = map(resps, parse_resp, .progress = TRUE)
+parsed_resps = map(resps$body, parse_resp, .progress = TRUE)
 toc()
 
 parsed_df = parsed_resps |>
@@ -80,6 +115,17 @@ parsed_df = parsed_resps |>
       as_tibble() |>
       mutate(id = 1:n()) |>
       select(id, everything())
+
+## Parsing QA check ----
+bind_cols(resps, parsed_df) |>
+      rowwise() |>
+      mutate(check = {
+            map2(body, full_response, adist) |>
+                  as.numeric()
+      }) |>
+      select(student, check, body, full_response) |>
+      arrange(desc(check)) |>
+      view(title = 'Parsing QA')
 
 # Cluster responses ----
 ## LLM response schema ----
@@ -162,8 +208,8 @@ clustered_df
 ## 1. build table
 tbl = clustered_df |>
       arrange(cluster) |>
-      mutate(response = row_number()) |>
-      select(response, quote, question, answer) |>
+      # mutate(response = row_number()) |>
+      select(id, quote, question, answer) |>
       tt() |>
       group_tt(i = clustered_df$cluster)
 tbl
