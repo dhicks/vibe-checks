@@ -10,15 +10,15 @@ library(tinytable)
 
 # LLM parameters ----
 model = 'gemma3:12b'
-num_ctx = 8000
+num_ctx = 8000 ## context window
 
 # Retrieve responses ----
 ## Canvas parameters ----
 ## STE Fall 2025
 ## <https://catcourses.ucmerced.edu/courses/35976>
 course_id = '35976'
-## Vibe check for Week 02
-assignment_id = '503498'
+## Vibe check for Week 03
+assignment_id = '503499'
 
 options(.rcanvas.show.url = TRUE)
 ## API token: <https://github.com/daranzolin/rcanvas?tab=readme-ov-file#setup>
@@ -31,6 +31,7 @@ students_df = get_course_items(course_id, item = "students") |>
       as_tibble() |>
       select(id, name, sortable_name) |>
       arrange(sortable_name) |>
+      ## Prefix each name w/ the number they get in Speed Grader
       mutate(
             idx = {
                   row_number() %>%
@@ -43,6 +44,7 @@ students_df = get_course_items(course_id, item = "students") |>
 resps = get_submissions(course_id, 'assignments', assignment_id) |>
       select(id = user_id, body) |>
       filter(!is.na(body)) |>
+      ## Canvas HTML garbage
       mutate(body = {
             body |> xfun::strip_html() |> textutils::HTMLdecode()
       }) |>
@@ -88,7 +90,6 @@ Assignment Instructions:
 {instructions}
 
 ==========
-Student Response: 
 '
 )
 
@@ -99,7 +100,8 @@ parse_resp = partial(
       system = system,
       output = 'text',
       format = schema,
-      num_ctx = num_ctx
+      num_ctx = num_ctx,
+      seed = 20250911
 )
 
 ## ~15 sec/response using gemma3:12b
@@ -120,6 +122,7 @@ parsed_df = parsed_resps |>
 bind_cols(resps, parsed_df) |>
       rowwise() |>
       mutate(check = {
+            ## Levenshtein distance between original and "full response" in model output
             map2(body, full_response, adist) |>
                   as.numeric()
       }) |>
@@ -129,6 +132,7 @@ bind_cols(resps, parsed_df) |>
 
 # Cluster responses ----
 ## LLM response schema ----
+## TODO: don't reuse `system` and `schema`
 schema = list(
       type = 'object',
       properties = list(
@@ -161,7 +165,7 @@ Assignment Instructions:
 
 A previous LLM took the `full_response` and parsed it into the quote, the question, and the answer attempt. Each row starts with a number ID for that response. The columns are separated by a single bar |, and the end of each row is marked by a triple bar |||. 
 
-Your job is to extract thematic clusters from the comments. Focus especially on common questions in the `questions` column. Use the following steps: 
+Your job is to extract thematic clusters from the submissions. Focus especially on the `questions` column. Walk through the following process step-by-step in the `think` field of the output: 
 
 1. First carefully review all the comments. 
 2. After reading all the comments, identify 3-5 thematic clusters.
@@ -174,14 +178,16 @@ Your job is to extract thematic clusters from the comments. Focus especially on 
 
 In your response, use the `think` field to thoroughly document your process for all of the above steps. This field should be detailed, about 200-500 words long. 
 
-Use the `clusters` field to list the labels for the clusters. Then `classified` to do the actual labeling, with the response's ID number, and then the cluster label. I will use the response ID to link your cluster assignment back to the original submission."
+==========
+"
 
 prompt = parsed_df |>
       format_delim(delim = '|', eol = '|||')
 
 ## Cluster ----
+tic()
 clustered = generate(
-      model = model,
+      model = 'gemma3:12b',
       system = system,
       prompt = prompt,
       output = 'text',
@@ -189,10 +195,12 @@ clustered = generate(
       stream = FALSE,
       num_ctx = num_ctx
 )
+toc()
 
 clustered |>
       fromJSON() |>
-      magrittr::extract2('think')
+      magrittr::extract2('think') |>
+      cat()
 
 resp_df = fromJSON(clustered)$classified |>
       distinct()
@@ -204,15 +212,19 @@ clustered_df = full_join(resp_df, parsed_df, by = 'id') |>
       arrange(cluster, id)
 clustered_df
 
+
 # Output ----
+## Markdown table for website ----
 ## 1. build table
 tbl = clustered_df |>
       arrange(cluster) |>
       # mutate(response = row_number()) |>
       select(id, quote, question, answer) |>
+      mutate(across(everything(), ~ str_replace_all(.x, '\n', '</br>'))) |>
       tt() |>
       group_tt(i = clustered_df$cluster)
 tbl
+stop('check for paragraphs')
 
 ## 2. write markdown file
 outfile = file.path(
@@ -239,3 +251,11 @@ format:
 ## 3b. prepend YAML header
 c(header, tbl_md) |>
       write_lines(outfile)
+
+## CSV with names and clustered, parsed questions ----
+csv_out = file.path('csv', glue('{today()}.csv'))
+
+clustered_df |>
+      mutate(student = resps$student) |>
+      select(cluster, student, everything()) |>
+      write_excel_csv(csv_out)
