@@ -4,6 +4,7 @@ library(rcanvas)
 library(ollamar)
 library(jsonlite)
 library(glue)
+library(cluster)
 library(tictoc)
 
 library(tinytable)
@@ -42,6 +43,7 @@ students_df = get_course_items(course_id, item = "students") |>
 
 ## Get submissions ----
 resps = get_submissions(course_id, 'assignments', assignment_id) |>
+      as_tibble() |>
       select(id = user_id, body) |>
       filter(!is.na(body)) |>
       ## Canvas HTML garbage
@@ -49,16 +51,139 @@ resps = get_submissions(course_id, 'assignments', assignment_id) |>
             body |> xfun::strip_html() |> textutils::HTMLdecode()
       }) |>
       left_join(students_df, by = 'id') |>
-      select(student = prefix, body)
+      select(student = prefix, body) |>
+      mutate(id = row_number())
 
 ## Claude-generated responses for development
 # resps = 'gen_responses.txt' |>
 #       read_file() |>
 #       str_split_1('==========')
 
+# Cluster responses ----
+## Construct embeddings ----
+tic()
+embeddings = embed(
+      'snowflake-arctic-embed2:latest',
+      resps$body,
+      num_ctx = num_ctx,
+      truncate = FALSE
+)
+toc()
+
+sim_mx = crossprod(embeddings)
+dist_mx = as.dist(1 - sim_mx)
+
+## Hierarchical clustering ----
+clust = hclust(dist_mx)
+plot(clust)
+rect.hclust(clust, k = 4)
+
+## Maximize silhouette score
+# silhouette_scores <- sapply(2:10, function(k) {
+#       clusters <- cutree(clust, k = k)
+#       mean(silhouette(clusters, dist)[, 3])
+# })
+# which.max(silhouette_scores) + 1
+
+## Identify the lowest value of k st the largest cluster is <= 5
+max_freq <- function(x) {
+      max(table(x))
+}
+first_thresh = function(x, thresh = 5) {
+      which(x <= thresh) |>
+            first()
+}
+
+k = map_int(
+      1:10,
+      ~ {
+            cutree(clust, k = .x) |>
+                  max_freq()
+      }
+) |>
+      first_thresh()
+
+clusters_df = resps |>
+      mutate(cluster_idx = cutree(clust, k = k)) |>
+      relocate(cluster_idx) |>
+      arrange(desc(cluster_idx))
+
+## Labels ----
+## Assignment instructions ----
+instructions = '/Users/danhicks/Google Drive/Teaching/*STE/site/assignments/vibe_check.md' |>
+      read_file()
+
+## LLM response schema ----
+label_schm = list(
+      type = 'object',
+      properties = list(
+            think = list(type = 'string'),
+            clusters = list(
+                  type = 'array',
+                  items = list(
+                        type = 'object',
+                        properties = list(
+                              cluster_idx = list(type = 'integer'),
+                              cluster_label = list(type = 'string')
+                        ),
+                        required = list('cluster_idx', 'cluster_label')
+                  )
+            )
+      ),
+      required = list('think', 'clusters')
+)
+
+## Labeling task prompt
+label_sys = glue(
+      "The following is a spreadsheet of submissions for a short reading reflection assignment, with these instructions: 
+
+==========
+Assignment Instructions:
+
+{instructions}
+
+==========
+      
+Hierarchical clustering has been applied, assigning each submission to a cluster. Each row starts with a numeric cluster index, the student's name, and the body of their response. The columns are separated by a single bar |, and the end of each row is marked by a triple bar |||. 
+
+Your task is to come up with labels for each cluster. Each label should be a short descriptive phrase, no more than 5 words long, that helps readers understand at a glance the major topic or theme of the submissions for each cluster. Use the `think` field to document your work. This field should be detailed, 200-500 words long. 
+
+The clusters, their labels, and the submission text will be used to create a quick-reference table for discussion in class. 
+
+==========
+"
+)
+
+label_prompt = clusters_df |>
+      format_delim(delim = '|', eol = '|||')
+
+## Generate labels
+tic()
+labels_resp = generate(
+      model = model,
+      system = label_sys,
+      prompt = label_prompt,
+      output = 'text',
+      format = label_schm,
+      stream = TRUE,
+      num_ctx = num_ctx,
+      seed = 20250912
+)
+toc()
+
+labels_df = fromJSON(labels_resp)$clusters
+
+## Labels QA ----
+left_join(clusters_df, labels_df, by = 'cluster_idx') |>
+      as.tibble() |>
+      relocate(cluster_label, .before = student) |>
+      relocate(student, .before = cluster_idx) |>
+      view('Labels QA')
+stop('Confirm labels before moving on')
+
 # Parse responses ----
 ## LLM response schema ----
-schema = list(
+parse_schm = list(
       type = 'object',
       properties = list(
             full_response = list(type = 'string'),
@@ -69,12 +194,8 @@ schema = list(
       required = list('full_response', 'quote', 'question', 'answer')
 )
 
-## Assignment instructions ----
-instructions = '/Users/danhicks/Google Drive/Teaching/*STE/site/assignments/vibe_check.md' |>
-      read_file()
-
 ## Task prompt ----
-system = glue(
+parse_sys = glue(
       'A college student was given a short, structured reading-reflection assignment. Your job is to identify the parts of the student\'s response, and arrange them into a JSON structure for further processing. 
 
 Pay attention to the structure of the response, not the content. Do not address the questions or provide any commentary on the quote or their answer. 
@@ -97,9 +218,9 @@ Assignment Instructions:
 parse_resp = partial(
       generate,
       model = model,
-      system = system,
+      system = parse_sys,
       output = 'text',
-      format = schema,
+      format = parse_schm,
       num_ctx = num_ctx,
       seed = 20250911
 )
@@ -115,114 +236,43 @@ parsed_df = parsed_resps |>
       str_c('[', ., ']') |>
       fromJSON() |>
       as_tibble() |>
-      mutate(id = 1:n()) |>
+      mutate(id = row_number()) |>
       select(id, everything())
 
 ## Parsing QA check ----
-bind_cols(resps, parsed_df) |>
+full_join(resps, parsed_df, by = 'id') |>
       rowwise() |>
       mutate(check = {
             ## Levenshtein distance between original and "full response" in model output
             map2(body, full_response, adist) |>
                   as.numeric()
       }) |>
-      select(student, check, body, full_response) |>
+      select(student, check, body, full_response, id) |>
       arrange(desc(check)) |>
       view(title = 'Parsing QA')
 
-# Cluster responses ----
-## LLM response schema ----
-## TODO: don't reuse `system` and `schema`
-schema = list(
-      type = 'object',
-      properties = list(
-            think = list(type = 'string'),
-            clusters = list(type = 'array', items = list(type = 'string')),
-            classified = list(
-                  type = 'array',
-                  items = list(
-                        type = 'object',
-                        properties = list(
-                              id = list(type = 'integer'),
-                              cluster = list(type = 'string')
-                        ),
-                        required = list('student', 'cluster')
-                  )
-            )
-      ),
-      required = list('think', 'clusters', 'classified')
-)
-
-## Task prompt ----
-system = "The following is a spreadsheet of submissions for a short reading reflection assignment, with these instructions: 
-
-==========
-Assignment Instructions:
-
-{instructions}
-
-==========
-
-A previous LLM took the `full_response` and parsed it into the quote, the question, and the answer attempt. Each row starts with a number ID for that response. The columns are separated by a single bar |, and the end of each row is marked by a triple bar |||. 
-
-Your job is to extract thematic clusters from the submissions. Focus especially on the `questions` column. Walk through the following process step-by-step in the `think` field of the output: 
-
-1. First carefully review all the comments. 
-2. After reading all the comments, identify 3-5 thematic clusters.
-3. Give each cluster a descriptive label of no more than 3 words. 
-4. Assign every single comment to exactly one cluster. 
-    - Note: You may add an \"unclassified\" cluster if necessary, but try to assign every comment to a thematic cluster if possible. 
-5. Conduct two data validation checks: 
-    a. Every single comment is classified into a cluster. 
-    b. Each comment is classified into only one cluster, and only appears once in the list. 
-
-In your response, use the `think` field to thoroughly document your process for all of the above steps. This field should be detailed, about 200-500 words long. 
-
-==========
-"
-
-prompt = parsed_df |>
-      format_delim(delim = '|', eol = '|||')
-
-## Cluster ----
-tic()
-clustered = generate(
-      model = 'gemma3:12b',
-      system = system,
-      prompt = prompt,
-      output = 'text',
-      format = schema,
-      stream = FALSE,
-      num_ctx = num_ctx
-)
-toc()
-
-clustered |>
-      fromJSON() |>
-      magrittr::extract2('think') |>
-      cat()
-
-resp_df = fromJSON(clustered)$classified |>
-      distinct()
-
-stopifnot(identical(nrow(resp_df), nrow(parsed_df)))
-
-clustered_df = full_join(resp_df, parsed_df, by = 'id') |>
+# Combine labeled clusters + parsed responses ----
+comb_df = labels_df |>
       as_tibble() |>
-      arrange(cluster, id)
-clustered_df
+      right_join(clusters_df, by = 'cluster_idx') |>
+      replace_na(list(cluster_label = 'Other Questions')) |>
+      mutate(cluster_label = fct_inorder(cluster_label)) |>
+      select(cluster = cluster_label, id, student, body) |>
+      full_join(parsed_df, by = 'id') |>
+      select(!full_response)
+
+comb_df
 
 
 # Output ----
 ## Markdown table for website ----
 ## 1. build table
-tbl = clustered_df |>
-      arrange(cluster) |>
-      # mutate(response = row_number()) |>
+tbl = comb_df |>
       select(id, quote, question, answer) |>
+      ## Handle paragraph breaks w/in submission parts
       mutate(across(everything(), ~ str_replace_all(.x, '\n', '</br>'))) |>
       tt() |>
-      group_tt(i = clustered_df$cluster)
+      group_tt(i = as.character(comb_df$cluster))
 tbl
 stop('check for paragraphs')
 
@@ -255,7 +305,4 @@ c(header, tbl_md) |>
 ## CSV with names and clustered, parsed questions ----
 csv_out = file.path('csv', glue('{today()}.csv'))
 
-clustered_df |>
-      mutate(student = resps$student) |>
-      select(cluster, student, everything()) |>
-      write_excel_csv(csv_out)
+write_excel_csv(comb_df, csv_out)
