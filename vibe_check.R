@@ -45,7 +45,7 @@ students_df = get_course_items(course_id, item = "students") |>
 ## Get submissions ----
 resps = get_submissions(course_id, 'assignments', assignment_id) |>
       as_tibble() |>
-      filter(!grade == 'incomplete') |>
+      filter(grade != 'incomplete') |>
       select(id = user_id, body) |>
       filter(!is.na(body)) |>
       ## Canvas HTML garbage
