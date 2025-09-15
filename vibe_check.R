@@ -10,16 +10,17 @@ library(tictoc)
 library(tinytable)
 
 # LLM parameters ----
-model = 'gemma3:12b'
-num_ctx = 8000 ## context window
+embed_model = 'snowflake-arctic-embed2' ## for generating embeddings
+inference_model = 'gemma3:12b' ## for labeling clusters and parsing responses
+num_ctx = 16000 ## context window
 
 # Retrieve responses ----
 ## Canvas parameters ----
 ## STE Fall 2025
 ## <https://catcourses.ucmerced.edu/courses/35976>
 course_id = '35976'
-## Vibe check for Week 03
-assignment_id = '503499'
+## Vibe check for Week 04
+assignment_id = '503500'
 
 options(.rcanvas.show.url = TRUE)
 ## API token: <https://github.com/daranzolin/rcanvas?tab=readme-ov-file#setup>
@@ -44,6 +45,7 @@ students_df = get_course_items(course_id, item = "students") |>
 ## Get submissions ----
 resps = get_submissions(course_id, 'assignments', assignment_id) |>
       as_tibble() |>
+      filter(!grade == 'incomplete') |>
       select(id = user_id, body) |>
       filter(!is.na(body)) |>
       ## Canvas HTML garbage
@@ -63,7 +65,7 @@ resps = get_submissions(course_id, 'assignments', assignment_id) |>
 ## Construct embeddings ----
 tic()
 embeddings = embed(
-      'snowflake-arctic-embed2:latest',
+      embed_model,
       resps$body,
       num_ctx = num_ctx,
       truncate = FALSE
@@ -76,12 +78,13 @@ dist_mx = as.dist(1 - sim_mx)
 ## Hierarchical clustering ----
 clust = hclust(dist_mx)
 plot(clust)
-rect.hclust(clust, k = 4)
+rect.hclust(clust, k = 6)
 
 ## Maximize silhouette score
+## Tends to create larger clusters than I want?
 # silhouette_scores <- sapply(2:10, function(k) {
 #       clusters <- cutree(clust, k = k)
-#       mean(silhouette(clusters, dist)[, 3])
+#       mean(silhouette(clusters, dist_mx)[, 3])
 # })
 # which.max(silhouette_scores) + 1
 
@@ -101,14 +104,19 @@ k = map_int(
                   max_freq()
       }
 ) |>
-      first_thresh()
+      first_thresh(6)
+
+message(glue('k = {k}'))
+
+plot(clust)
+rect.hclust(clust, k = k)
 
 clusters_df = resps |>
       mutate(cluster_idx = cutree(clust, k = k)) |>
-      relocate(cluster_idx) |>
+      relocate(cluster_idx, id) |>
       arrange(desc(cluster_idx))
 
-## Labels ----
+# Labels ----
 ## Assignment instructions ----
 instructions = '/Users/danhicks/Google Drive/Teaching/*STE/site/assignments/vibe_check.md' |>
       read_file()
@@ -146,7 +154,11 @@ Assignment Instructions:
       
 Hierarchical clustering has been applied, assigning each submission to a cluster. Each row starts with a numeric cluster index, the student's name, and the body of their response. The columns are separated by a single bar |, and the end of each row is marked by a triple bar |||. 
 
-Your task is to come up with labels for each cluster. Each label should be a short descriptive phrase, no more than 5 words long, that helps readers understand at a glance the major topic or theme of the submissions for each cluster. Use the `think` field to document your work. This field should be detailed, 200-500 words long. 
+Your task is to come up with labels for each cluster. Use the `think` field to document your work. This field should be detailed, 500-1000 words long. 
+
+First note to yourself the total number of clusters. Each cluster must be assigned exactly one label. 
+
+Explicitly consider the contents of each submission in the cluster. Brainstorming 2-3 potential labels for choosing one. A good label will be no more than 5 words long, and help the students understand both the major topic or theme of the cluster and also how it's distinctive from other clusters. 
 
 The clusters, their labels, and the submission text will be used to create a quick-reference table for discussion in class. 
 
@@ -157,28 +169,30 @@ The clusters, their labels, and the submission text will be used to create a qui
 label_prompt = clusters_df |>
       format_delim(delim = '|', eol = '|||')
 
-## Generate labels
+## Generate labels ----
 tic()
 labels_resp = generate(
-      model = model,
+      model = inference_model,
       system = label_sys,
       prompt = label_prompt,
       output = 'text',
       format = label_schm,
       stream = TRUE,
       num_ctx = num_ctx,
-      seed = 20250912
+      num_predict = num_ctx
+      # seed = 2025091200
 )
 toc()
 
 labels_df = fromJSON(labels_resp)$clusters
 
-## Labels QA ----
+## Labels QA
 left_join(clusters_df, labels_df, by = 'cluster_idx') |>
-      as.tibble() |>
+      as_tibble() |>
       relocate(cluster_label, .before = student) |>
       relocate(student, .before = cluster_idx) |>
       view('Labels QA')
+
 stop('Confirm labels before moving on')
 
 # Parse responses ----
@@ -217,7 +231,7 @@ Assignment Instructions:
 ## Parse ----
 parse_resp = partial(
       generate,
-      model = model,
+      model = inference_model,
       system = parse_sys,
       output = 'text',
       format = parse_schm,
@@ -251,15 +265,22 @@ full_join(resps, parsed_df, by = 'id') |>
       arrange(desc(check)) |>
       view(title = 'Parsing QA')
 
+stop('Confirm parsing before moving on')
+
 # Combine labeled clusters + parsed responses ----
 comb_df = labels_df |>
       as_tibble() |>
       right_join(clusters_df, by = 'cluster_idx') |>
       replace_na(list(cluster_label = 'Other Questions')) |>
-      mutate(cluster_label = fct_inorder(cluster_label)) |>
+      mutate(cluster_label = {
+            cluster_label |>
+                  fct_infreq() |>
+                  fct_rev()
+      }) |>
       select(cluster = cluster_label, id, student, body) |>
       full_join(parsed_df, by = 'id') |>
-      select(!full_response)
+      select(!full_response) |>
+      arrange(cluster)
 
 comb_df
 
@@ -290,7 +311,7 @@ header = glue(
       '---
 date: {today()}
 title: {stamp("Vibe check for Jan 1")(today())}
-subtitle: \"Responses by PHIL 006 students, clustered using {model}\"
+subtitle: \"Responses by PHIL 006 students, clustered using {embed_model} and {inference_model}\"
 format: 
   html:
     page-layout: full
