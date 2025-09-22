@@ -47,7 +47,7 @@ resps = get_submissions(course_id, 'assignments', assignment_id) |>
       as_tibble() |>
       filter(grade != 'incomplete') |>
       select(id = user_id, body) |>
-      filter(!is.na(body)) |>
+      filter(!is.na(body), str_length(body) > 120) |>
       ## Canvas HTML garbage
       mutate(body = {
             body |> xfun::strip_html() |> textutils::HTMLdecode()
