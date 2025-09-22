@@ -11,7 +11,8 @@ library(tinytable)
 
 # LLM parameters ----
 embed_model = 'snowflake-arctic-embed2' ## for generating embeddings
-inference_model = 'gemma3:12b' ## for labeling clusters and parsing responses
+inference_model = 'gpt-oss:20b' ## for labeling clusters
+parsing_model = 'gemma3:12b' ## for parsing responses
 num_ctx = 16000 ## context window
 
 # Retrieve responses ----
@@ -19,8 +20,8 @@ num_ctx = 16000 ## context window
 ## STE Fall 2025
 ## <https://catcourses.ucmerced.edu/courses/35976>
 course_id = '35976'
-## Vibe check for Week 04
-assignment_id = '503500'
+## Vibe check for Week 05
+assignment_id = '503501'
 
 options(.rcanvas.show.url = TRUE)
 ## API token: <https://github.com/daranzolin/rcanvas?tab=readme-ov-file#setup>
@@ -75,6 +76,8 @@ toc()
 sim_mx = crossprod(embeddings)
 dist_mx = as.dist(1 - sim_mx)
 
+heatmap(sim_mx, symm = TRUE)
+
 ## Hierarchical clustering ----
 clust = hclust(dist_mx)
 plot(clust)
@@ -104,7 +107,7 @@ k = map_int(
                   max_freq()
       }
 ) |>
-      first_thresh(6)
+      first_thresh(5)
 
 message(glue('k = {k}'))
 
@@ -152,22 +155,28 @@ Assignment Instructions:
 
 ==========
       
-Hierarchical clustering has been applied, assigning each submission to a cluster. Each row starts with a numeric cluster index, the student's name, and the body of their response. The columns are separated by a single bar |, and the end of each row is marked by a triple bar |||. 
+An embedding-based hierarchical clustering approach has been applied, assigning each submission to a cluster. Each row starts with a numeric cluster index, the student's name, and the body of their response. The columns are separated by a single bar |, and the end of each row is marked by a triple bar |||. 
 
 Your task is to come up with labels for each cluster. Use the `think` field to document your work. This field should be detailed, 500-1000 words long. 
 
-First note to yourself the total number of clusters. Each cluster must be assigned exactly one label. 
+First note to yourself the total number of clusters. Each cluster must be assigned exactly one label in the final output. 
 
-Explicitly consider the contents of each submission in the cluster. Brainstorming 2-3 potential labels for choosing one. A good label will be no more than 5 words long, and help the students understand both the major topic or theme of the cluster and also how it's distinctive from other clusters. 
+Explicitly consider the contents of each submission in the cluster. Brainstorm 2-3 potential labels before choosing one. A good label will be no more than 5 words long, and help the students understand both the specific topic or theme of the cluster and also how it's distinctive from other clusters. 
 
 The clusters, their labels, and the submission text will be used to create a quick-reference table for discussion in class. 
 
+Your final output will be required to fit this structured output schema: 
+
+==========
+{toJSON(label_schm)}
 ==========
 "
 )
 
 label_prompt = clusters_df |>
       format_delim(delim = '|', eol = '|||')
+
+(str_length(label_sys) + str_length(label_prompt)) / 4
 
 ## Generate labels ----
 tic()
@@ -176,10 +185,10 @@ labels_resp = generate(
       system = label_sys,
       prompt = label_prompt,
       output = 'text',
-      format = label_schm,
+      # format = label_schm, # <https://github.com/ollama/ollama/issues/11691>
       stream = TRUE,
       num_ctx = num_ctx,
-      num_predict = num_ctx
+      num_predict = 3 * num_ctx
       # seed = 2025091200
 )
 toc()
@@ -231,12 +240,12 @@ Assignment Instructions:
 ## Parse ----
 parse_resp = partial(
       generate,
-      model = inference_model,
+      model = parsing_model,
       system = parse_sys,
       output = 'text',
       format = parse_schm,
       num_ctx = num_ctx,
-      seed = 20250911
+      # seed = 20250911
 )
 
 ## ~15 sec/response using gemma3:12b
