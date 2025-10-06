@@ -20,8 +20,8 @@ num_ctx = 16000 ## context window
 ## STE Fall 2025
 ## <https://catcourses.ucmerced.edu/courses/35976>
 course_id = '35976'
-## Vibe check for Week 05
-assignment_id = '503501'
+## Vibe check for Week 07
+assignment_id = '503503'
 
 options(.rcanvas.show.url = TRUE)
 ## API token: <https://github.com/daranzolin/rcanvas?tab=readme-ov-file#setup>
@@ -135,9 +135,14 @@ label_schm = list(
                         type = 'object',
                         properties = list(
                               cluster_idx = list(type = 'integer'),
-                              cluster_label = list(type = 'string')
+                              cluster_label = list(type = 'string'),
+                              cluster_q = list(type = 'string')
                         ),
-                        required = list('cluster_idx', 'cluster_label')
+                        required = list(
+                              'cluster_idx',
+                              'cluster_label',
+                              'cluster_q'
+                        )
                   )
             )
       ),
@@ -157,13 +162,15 @@ Assignment Instructions:
       
 An embedding-based hierarchical clustering approach has been applied, assigning each submission to a cluster. Each row starts with a numeric cluster index, the student's name, and the body of their response. The columns are separated by a single bar |, and the end of each row is marked by a triple bar |||. 
 
-Your task is to come up with labels for each cluster. Use the `think` field to document your work. This field should be detailed, 500-1000 words long. 
+Your task is to come up with labels and a representative question for each cluster. Use the `think` field to document your work. This field should be detailed, 500-1000 words long. 
 
 First note to yourself the total number of clusters. Each cluster must be assigned exactly one label in the final output. 
 
 Explicitly consider the contents of each submission in the cluster. Brainstorm 2-3 potential labels before choosing one. A good label will be no more than 5 words long, and help the students understand both the specific topic or theme of the cluster and also how it's distinctive from other clusters. 
 
-The clusters, their labels, and the submission text will be used to create a quick-reference table for discussion in class. 
+Then either pick or synthesize a question to represent the entire cluster. Ideally you would pick one of the questions exactly as given. (In this case, don't include the quotation or the attempted answer parts, just the question itself.) However, if there's some important heterogeneity within the cluster, you can synthesize the various issues into a single question that encompasses all perspectives. Keep the question fairly short, no more than 30 words long. 
+
+The clusters, their labels and questions, and the submission text will be used to create a quick-reference table for discussion in class. 
 
 Your final output will be required to fit this structured output schema: 
 
@@ -188,10 +195,13 @@ labels_resp = generate(
       # format = label_schm, # <https://github.com/ollama/ollama/issues/11691>
       stream = TRUE,
       num_ctx = num_ctx,
-      num_predict = 3 * num_ctx
+      num_predict = num_ctx
       # seed = 2025091200
 )
 toc()
+
+fromJSON(labels_resp)$think |>
+      cat()
 
 labels_df = fromJSON(labels_resp)$clusters
 
@@ -286,7 +296,7 @@ comb_df = labels_df |>
                   fct_infreq() |>
                   fct_rev()
       }) |>
-      select(cluster = cluster_label, id, student, body) |>
+      select(cluster = cluster_label, cluster_q, id, student, body) |>
       full_join(parsed_df, by = 'id') |>
       select(!full_response) |>
       arrange(cluster)
@@ -301,8 +311,14 @@ tbl = comb_df |>
       select(id, quote, question, answer) |>
       ## Handle paragraph breaks w/in submission parts
       mutate(across(everything(), ~ str_replace_all(.x, '\n', '</br>'))) |>
-      tt() |>
-      group_tt(i = as.character(comb_df$cluster))
+      tt(width = c(1, 5, 5, 4)) |>
+      group_tt(
+            i = str_c(
+                  as.character(comb_df$cluster),
+                  comb_df$cluster_q,
+                  sep = '</br>'
+            )
+      )
 tbl
 stop('check for paragraphs')
 
