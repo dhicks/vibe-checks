@@ -20,8 +20,8 @@ num_ctx = 16000 ## context window
 ## STE Fall 2025
 ## <https://catcourses.ucmerced.edu/courses/35976>
 course_id = '35976'
-## Vibe check for Week 07
-assignment_id = '503503'
+## Vibe check for Week 10
+assignment_id = '503506'
 
 options(.rcanvas.show.url = TRUE)
 ## API token: <https://github.com/daranzolin/rcanvas?tab=readme-ov-file#setup>
@@ -101,7 +101,7 @@ first_thresh = function(x, thresh = 5) {
 }
 
 k = map_int(
-      1:10,
+      1:nrow(resps),
       ~ {
             cutree(clust, k = .x) |>
                   max_freq()
@@ -117,7 +117,7 @@ rect.hclust(clust, k = k)
 clusters_df = resps |>
       mutate(cluster_idx = cutree(clust, k = k)) |>
       relocate(cluster_idx, id) |>
-      arrange(desc(cluster_idx))
+      arrange((cluster_idx))
 
 # Labels ----
 ## Assignment instructions ----
@@ -166,9 +166,9 @@ Your task is to come up with labels and a representative question for each clust
 
 First note to yourself the total number of clusters. Each cluster must be assigned exactly one label in the final output. 
 
-Explicitly consider the contents of each submission in the cluster. Brainstorm 2-3 potential labels before choosing one. A good label will be no more than 5 words long, and help the students understand both the specific topic or theme of the cluster and also how it's distinctive from other clusters. 
+Explicitly consider the contents of each submission in the cluster, emphasizing the questions. Brainstorm 2-3 potential labels before choosing one. A good label will be no more than 5 words long, and help the students understand both the specific topic or theme of the cluster and also how it's distinctive from other clusters. 
 
-Then either pick or synthesize a question to represent the entire cluster. Ideally you would pick one of the questions exactly as given. (In this case, don't include the quotation or the attempted answer parts, just the question itself.) However, if there's some important heterogeneity within the cluster, you can synthesize the various issues into a single question that encompasses all perspectives. Keep the question fairly short, no more than 30 words long. 
+Then, for each cluster, pick one of its submissions to represent the entire cluster, again emphasizing the question section. Extract this representative question section verbatim, exactly as given. Prefix the question with the submission ID from the `id` column as in this example: \"11-Can science be value-free?\" (*Important:* Prefix the `id` column, not the `cluster_idx` or `student` column.)
 
 The clusters, their labels and questions, and the submission text will be used to create a quick-reference table for discussion in class. 
 
@@ -200,10 +200,17 @@ labels_resp = generate(
 )
 toc()
 
-fromJSON(labels_resp)$think |>
+# fromJSON(labels_resp)$think |> cat()
+labels_resp |>
+      str_replace_all('\n', '\\\\n') |>
+      fromJSON() |>
+      magrittr::extract2('think') |>
       cat()
 
-labels_df = fromJSON(labels_resp)$clusters
+labels_df = labels_resp |>
+      str_replace_all('\n', '\\\\n') |>
+      fromJSON() |>
+      magrittr::extract2('clusters')
 
 ## Labels QA
 left_join(clusters_df, labels_df, by = 'cluster_idx') |>
@@ -233,7 +240,9 @@ parse_sys = glue(
 
 Pay attention to the structure of the response, not the content. Do not address the questions or provide any commentary on the quote or their answer. 
 
-The `full_response` field should contain the response exactly as given. For the other fields, if the response includes section numbers or paragraph headers like "Quote:" or "Question:" you should use these to parse the structure of the response, but skip them in your output. Otherwise you should copy each part verbatim. The student should provide a citation at the end of the quote. Make sure you include this citation. 
+The `full_response` field should contain the response exactly as given. If the response includes section numbers or paragraph headers like "Quote:" or "Question:" you should use these to parse the structure of the response. You should copy each part verbatim, without any additions or removals. When combined, `quote`, `question`, and `answer` should be identical to `full_response`. 
+
+The student should provide a citation at the end of the quote. Make sure you include this citation. 
 
 If you cannot parse the response into the identified parts, return the response exactly as given in `full_response` and `NA` in the other fields. 
 
